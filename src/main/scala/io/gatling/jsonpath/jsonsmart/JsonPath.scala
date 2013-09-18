@@ -35,6 +35,7 @@ class JsonPath(val path: List[PathToken]) {
 		walk(JSONValue.parse(json), path)
 	}
 
+	// use @tailrec in Scala 2.11, cf: https://github.com/scala/scala/pull/2865
 	private[this] def walk(node: Any, path: List[PathToken]): Iterator[Any] = {
 		if (path.isEmpty)
 			Iterator.single(node)
@@ -89,32 +90,63 @@ class JsonPath(val path: List[PathToken]) {
 				case _ => Iterator.empty
 			}
 
-			case HasFilter(subQuery) => {
-				val elements: Iterator[Any] = node match {
-					case array: JList[_] => array.iterator
-					case obj: JMap[_, _] => obj.values.iterator
-					case _ => Iterator.empty
-				}
-
-				elements.filter(walk(_, subQuery.path).hasNext)
-			}
-			case BinaryOpFilter(op, lhs, rhs) => {
-				val elements: Iterator[Any] = node match {
-					case array: JList[_] => array.iterator
-					case obj: JMap[_, _] => obj.values.iterator
-					case _ => Iterator.empty
-				}
-
-				elements.filter(applyBinaryOp(_, op, lhs, rhs))
-			}
+			case filterToken: FilterToken => applyFilter(filterToken, node)
 
 			case AnyField(true) => recFieldExplorer(node)
-
-			case _ => Iterator.empty
 		}
 	}
 
-	/* Can we make it tail rec ? */
+	private[this] def applyFilter(filterToken: FilterToken, node: Any): Iterator[Any] = {
+
+		def resolveFilterToken(node: Any, filter: FilterValue): Option[Any] =
+			filter match {
+				case JPLong(l) => Some(l)
+				case JPDouble(d) => Some(d)
+				case JPString(s) => Some(s)
+				case SubQuery(q) => {
+					val it = walk(node, q)
+					if (it.hasNext) Some(it.next) else None
+				}
+			}
+
+		def applyBinaryOp(node: Any, op: ComparisonOperator, lhs: FilterValue, rhs: FilterValue): Boolean = {
+			val opEvaluation = for (
+				lhsNode <- resolveFilterToken(node, lhs);
+				rhsNode <- resolveFilterToken(node, rhs)
+			) yield op(lhsNode, rhsNode)
+
+			opEvaluation.getOrElse(false)
+		}
+
+		def elementsToFilter(node: Any): Iterator[Any] =
+			node match {
+				case array: JList[_] => array.iterator
+				case obj: JMap[_, _] => obj.values.iterator
+				case _ => Iterator.empty
+			}
+
+		def evaluateFilter(filterToken: FilterToken): Any => Boolean =
+			filterToken match {
+				case HasFilter(subQuery) => {
+					(node: Any) => walk(node, subQuery.path).hasNext
+				}
+
+				case ComparisonFilter(op, lhs, rhs) => {
+					(node: Any) => applyBinaryOp(node, op, lhs, rhs)
+				}
+
+				case BooleanFilter(op, filter1, filter2) => {
+					val f1 = evaluateFilter(filter1)
+					val f2 = evaluateFilter(filter2)
+					(node: Any) => op(f1(node), f2(node))
+				}
+			}
+
+		val filterFunction = evaluateFilter(filterToken)
+		elementsToFilter(node).filter(filterFunction)
+	}
+
+	// use @tailrec in Scala 2.11, cf: https://github.com/scala/scala/pull/2865
 	def recFieldFilter(node: Any, name: String): Iterator[Any] = {
 		def _recFieldFilter(node: Any): Iterator[Any] =
 			node match {
@@ -156,64 +188,4 @@ class JsonPath(val path: List[PathToken]) {
 			fromStartToEnd
 	}
 
-	private[this] def applyBinaryOp(node: Any, op: String, lhs: FilterToken, rhs: FilterToken): Boolean = {
-		val opEvaluation = for (
-			lhsNode <- resolveFilterToken(node, lhs);
-			rhsNode <- resolveFilterToken(node, rhs)
-		) yield OrderedOperator(op, lhsNode, rhsNode)
-
-		opEvaluation.getOrElse(false)
-	}
-
-	private[this] def resolveFilterToken(node: Any, filter: FilterToken): Option[Any] =
-		filter match {
-			case JPLong(l) => Some(l)
-			case JPDouble(d) => Some(d)
-			case JPString(s) => Some(s)
-			case SubQuery(q) => {
-				val it = walk(node, q)
-				if (it.hasNext) Some(it.next) else None
-			}
-		}
-}
-
-object OrderedOperator {
-
-	def isNumber(a: Any) = isIntegralNumber(a) || isFloatingPointNumber(a)
-
-	def isIntegralNumber(a: Any) = a.isInstanceOf[Int] || a.isInstanceOf[Long]
-	def asIntegralNumber(a: Any): Option[Long] = a match {
-		case a: Integer => Some(a.toLong)
-		case a: Long => Some(a)
-		case _ => None
-	}
-
-	def isFloatingPointNumber(a: Any) = a.isInstanceOf[Float] || a.isInstanceOf[Double]
-	def asFloatingPointNumber(a: Any): Option[Double] = a match {
-		case a: Int => Some(a.toDouble)
-		case a: Long => Some(a.toDouble)
-		case a: Float => Some(a.toDouble)
-		case a: Double => Some(a)
-		case _ => None
-	}
-
-	def apply(op: String, lhs: Any, rhs: Any): Boolean =
-		(lhs, rhs) match {
-			case (s1: String, s2: String) => eval(op, s1, s2)
-			case (i1, i2) if (isNumber(lhs) && isNumber(rhs)) =>
-				if (isIntegralNumber(lhs) && isIntegralNumber(rhs))
-					eval(op, asIntegralNumber(i1), asIntegralNumber(i2))
-				else
-					eval(op, asFloatingPointNumber(i1), asFloatingPointNumber(i2))
-			case _ => false
-		}
-
-	def eval[T <% Ordered[T]](op: String, lhs: T, rhs: T): Boolean =
-		op match {
-			case "==" => (lhs == rhs)
-			case ">=" => (lhs >= rhs)
-			case ">" => (lhs > rhs)
-			case "<=" => (lhs <= rhs)
-			case "<" => (lhs < rhs)
-		}
 }
