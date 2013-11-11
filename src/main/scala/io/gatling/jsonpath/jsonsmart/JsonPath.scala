@@ -1,72 +1,73 @@
 package io.gatling.jsonpath.jsonsmart
 
 import java.util.{ List => JList, Map => JMap }
-import scala.math.abs
+import io.gatling.jsonpath.{ Parser, ComparisonOperator }
+import io.gatling.jsonpath.AST._
 import net.minidev.json.JSONValue
-import io.gatling.jsonpath._
+import scala.math.abs
 import scala.collection.JavaConversions.{ asScalaIterator, asScalaBuffer }
 
-case class JPError(val reason: String)
+case class JPError(reason: String)
 
 object JsonPath {
-	val parser = Parser
+	val parser = new ThreadLocal[Parser]() {
+		override def initialValue() = new Parser
+	}
 
 	def compile(query: String): Either[JPError, JsonPath] = {
-		val compileResult = parser.compile(query)
+		val compileResult = parser.get.compile(query)
 		compileResult.map((q) => Right(new JsonPath(q))).getOrElse(Left(JPError(compileResult.toString)))
 	}
 
-	def query(query: String, json: String): Either[JPError, Iterator[Any]] = {
-		compile(query).right.map(_.query(json))
+	def queryJsonString(query: String, jsonString: String): Either[JPError, Iterator[Any]] =
+		compile(query).right.map(_.queryJsonString(jsonString))
+
+	def queryJsonObject(query: String, jsonObject: Any): Either[JPError, Iterator[Any]] =
+		compile(query).right.map(_.queryJsonObject(jsonObject))
+}
+
+class JsonPath(path: List[PathToken]) {
+	def queryJsonObject(jsonObject: Any) = {
+		new JsonPathWalker(jsonObject, path).walk
 	}
 
-	def query(query: String, json: Any): Either[JPError, Iterator[Any]] = {
-		compile(query).right.map(_.query(json))
+	def queryJsonString(jsonString: String) = {
+		new JsonPathWalker(JSONValue.parse(jsonString), path).walk
 	}
 }
 
-class JsonPath(val path: List[PathToken]) {
+class JsonPathWalker(rootNode: Any, fullPath: List[PathToken]) {
 
-	def query(json: Any) = {
-		walk(json, path)
-	}
-
-	def query(json: String) = {
-		walk(JSONValue.parse(json), path)
-	}
+	def walk(): Iterator[Any] = walk(rootNode, fullPath)
 
 	// use @tailrec in Scala 2.11, cf: https://github.com/scala/scala/pull/2865
-	private[this] def walk(node: Any, path: List[PathToken]): Iterator[Any] = {
-		if (path.isEmpty)
-			Iterator.single(node)
-		else {
-			val head :: tail = path
-			val nodes = walk1(node, head)
-			nodes.flatMap(walk(_, tail))
+	private[this] def walk(node: Any, path: List[PathToken]): Iterator[Any] =
+		path match {
+			case head :: tail => walk1(node, head).flatMap(walk(_, tail))
+			case Nil => Iterator.single(node)
 		}
-	}
 
 	private[this] def walk1(node: Any, query: PathToken): Iterator[Any] = {
 		query match {
-			case Root() => Iterator.single(node)
+			case RootNode => Iterator.single(rootNode)
 
-			case CurrentObject() => Iterator.single(node)
+			case CurrentNode => Iterator.single(node)
 
-			case Field(name, false) => node match {
-				case obj: JMap[_, _] if (obj.containsKey(name)) =>
+			case Field(name) => node match {
+				case obj: JMap[_, _] if obj.containsKey(name) =>
 					Iterator.single(obj.get(name))
 				case _ => Iterator.empty
 			}
 
-			case Field(name, true) => recFieldFilter(node, name)
+			case RecursiveField(name) => recFieldFilter(node, name)
 
 			case MultiField(fieldNames) => node match {
 				case obj: JMap[_, _] =>
-					fieldNames.iterator.filter(obj.containsKey(_)).map(obj.get(_))
+					fieldNames.iterator.collect { case fieldName if obj.containsKey(fieldName) => obj.get(fieldName) }
 				case _ => Iterator.empty
 			}
 
-			case AnyField(false) => node match {
+			case AnyField => node match {
 				case obj: JMap[_, _] => obj.values.iterator
 				case _ => Iterator.empty
 			}
@@ -84,15 +85,16 @@ class JsonPath(val path: List[PathToken]) {
 			case ArrayRandomAccess(indices) => node match {
 				case array: JList[_] =>
 					indices.iterator
-						.map(i => if (i >= 0) i else array.size + i)
-						.filter(i => i >= 0 && i < array.size)
-						.map(array.get(_))
+						.collect {
+							case i if i >= 0 && i < array.size => array.get(i)
+							case i if i < 0 && i >= -array.size => array.get(i + array.size)
+						}
 				case _ => Iterator.empty
 			}
 
 			case filterToken: FilterToken => applyFilter(filterToken, node)
 
-			case AnyField(true) => recFieldExplorer(node)
+			case RecursiveAnyField => recFieldExplorer(node)
 		}
 	}
 
@@ -110,10 +112,10 @@ class JsonPath(val path: List[PathToken]) {
 			}
 
 		def applyBinaryOp(node: Any, op: ComparisonOperator, lhs: FilterValue, rhs: FilterValue): Boolean = {
-			val opEvaluation = for (
-				lhsNode <- resolveFilterToken(node, lhs);
+			val opEvaluation = for {
+				lhsNode <- resolveFilterToken(node, lhs)
 				rhsNode <- resolveFilterToken(node, rhs)
-			) yield op(lhsNode, rhsNode)
+			} yield op(lhsNode, rhsNode)
 
 			opEvaluation.getOrElse(false)
 		}
@@ -151,9 +153,9 @@ class JsonPath(val path: List[PathToken]) {
 		def _recFieldFilter(node: Any): Iterator[Any] =
 			node match {
 				case obj: JMap[_, _] =>
-					val (filtered, toExplore) = obj.entrySet().iterator.partition(e => e.getKey == name)
+					val (filtered, toExplore) = obj.entrySet.iterator.partition(_.getKey == name)
 					filtered.map(_.getValue) ++ toExplore.flatMap(e => _recFieldFilter(e.getValue))
-				case list: JList[_] => list.iterator.flatMap(_recFieldFilter(_))
+				case list: JList[_] => list.iterator.flatMap(_recFieldFilter)
 				case _ => Iterator.empty
 			}
 
@@ -163,9 +165,9 @@ class JsonPath(val path: List[PathToken]) {
 	def recFieldExplorer(node: Any): Iterator[Any] =
 		node match {
 			case obj: JMap[_, _] =>
-				obj.values.iterator ++ obj.values.iterator.flatMap(recFieldExplorer(_))
+				obj.values.iterator ++ obj.values.iterator.flatMap(recFieldExplorer)
 			case list: JList[_] =>
-				list.iterator.flatMap(recFieldExplorer(_))
+				list.iterator.flatMap(recFieldExplorer)
 			case _ => Iterator.empty
 		}
 
@@ -175,11 +177,11 @@ class JsonPath(val path: List[PathToken]) {
 		def lenRelative(x: Int) = if (x >= 0) x else size + x
 		def stepRelative(x: Int) = if (step >= 0) x else -1 - x
 		def relative = lenRelative _ compose stepRelative _
-		val absStart = start.map(relative(_)).getOrElse(0)
-		val absEnd = stop.map(relative(_)).getOrElse(size)
+		val absStart = start.map(relative).getOrElse(0)
+		val absEnd = stop.map(relative).getOrElse(size)
 		val absStep = abs(step)
 
-		val elts: Iterator[Any] = if (step < 0) array.toBuffer.reverseIterator else array.iterator
+		val elts: Iterator[Any] = if (step < 0) array.reverseIterator else array.iterator
 		val fromStartToEnd = elts.slice(absStart, absEnd)
 
 		if (absStep != 1)
@@ -187,5 +189,4 @@ class JsonPath(val path: List[PathToken]) {
 		else
 			fromStartToEnd
 	}
-
 }

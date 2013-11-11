@@ -1,16 +1,16 @@
 package io.gatling.jsonpath
 
 import org.scalatest.FlatSpec
-import org.scalatest.matchers.ShouldMatchers
-import org.scalatest.matchers.Matcher
-import org.scalatest.matchers.MatchResult
+import org.scalatest.matchers.{ Matcher, MatchResult }
 import io.gatling.jsonpath.Parser._
+import io.gatling.jsonpath.AST._
+import org.scalatest.Matchers
 
-class ParserSpec extends FlatSpec with ShouldMatchers with ParsingMatchers {
+class ParserSpec extends FlatSpec with Matchers with ParsingMatchers {
 
 	"Field parsing" should "work with standard names" in {
 		def shouldParseField(name: String) = {
-			val field = Field(name, false)
+			val field = Field(name)
 			parse(dotField, s".$name") should beParsedAs(field)
 			parse(subscriptField, s"['$name']") should beParsedAs(field)
 		}
@@ -23,7 +23,7 @@ class ParserSpec extends FlatSpec with ShouldMatchers with ParsingMatchers {
 	}
 
 	it should "work with the root object" in {
-		parse(Parser.root, "$") should beParsedAs(Root())
+		parse(Parser.root, "$") should beParsedAs(RootNode)
 	}
 
 	it should "work when having multiple fields" in {
@@ -55,80 +55,80 @@ class ParserSpec extends FlatSpec with ShouldMatchers with ParsingMatchers {
 	}
 
 	it should "work with array access on the root object" in {
-		compile("$[1]").get should be(Root() :: ArrayRandomAccess(List(1)) :: Nil)
-		compile("$[*]").get should be(Root() :: ArraySlice(None, None) :: Nil)
+		new Parser().compile("$[1]").get should be(RootNode :: ArrayRandomAccess(List(1)) :: Nil)
+		new Parser().compile("$[*]").get should be(RootNode :: ArraySlice(None, None) :: Nil)
 	}
 
 	it should "work with array access on fields" in {
-		parse(pathSequence, ".foo[1]").get should be(Field("foo", false) :: ArrayRandomAccess(List(1)) :: Nil)
-		parse(pathSequence, ".ñ1çölå$[*]").get should be(Field("ñ1çölå$", false) :: ArraySlice(None, None) :: Nil)
+		parse(pathSequence, ".foo[1]").get should be(Field("foo") :: ArrayRandomAccess(List(1)) :: Nil)
+		parse(pathSequence, ".ñ1çölå$[*]").get should be(Field("ñ1çölå$") :: ArraySlice(None, None) :: Nil)
 	}
 
 	it should "work with array access on subscript fields" in {
-		parse(pathSequence, "['foo'][1]").get should be(Field("foo", false) :: ArrayRandomAccess(List(1)) :: Nil)
-		parse(pathSequence, "['ñ1çölå$'][*]").get should be(Field("ñ1çölå$", false) :: ArraySlice(None, None) :: Nil)
+		parse(pathSequence, "['foo'][1]").get should be(Field("foo") :: ArrayRandomAccess(List(1)) :: Nil)
+		parse(pathSequence, "['ñ1çölå$'][*]").get should be(Field("ñ1çölå$") :: ArraySlice(None, None) :: Nil)
 	}
 
 	"Dot fields" should "get parsed properly" in {
-		parse(dotField, ".foo") should beParsedAs(Field("foo", false))
-		parse(dotField, ".ñ1çölå$") should beParsedAs(Field("ñ1çölå$", false))
+		parse(dotField, ".foo") should beParsedAs(Field("foo"))
+		parse(dotField, ".ñ1çölå$") should beParsedAs(Field("ñ1çölå$"))
 	}
 
 	it should "work on the root element" in {
-		compile("$.foo").get should be(Root() :: Field("foo", false) :: Nil)
-		compile("$['foo']").get should be(Root() :: Field("foo", false) :: Nil)
+		new Parser().compile("$.foo").get should be(RootNode :: Field("foo") :: Nil)
+		new Parser().compile("$['foo']").get should be(RootNode :: Field("foo") :: Nil)
 
 		// TODO  : how to access childs w/ ['xxx'] notation
-		compile("$..foo").get should be(Root() :: Field("foo", true) :: Nil)
+		new Parser().compile("$..foo").get should be(RootNode :: RecursiveField("foo") :: Nil)
 	}
 
 	// cf : http://goessner.net/articles/JsonPath
 	"Expressions from Goessner specs" should "be correctly parsed" in {
 		def shouldParse(query: String, expected: Any) = {
-			compile(query).get should be(expected)
+			new Parser().compile(query).get should be(expected)
 		}
 
 		shouldParse("$.store.book[0].title", List(
-			Root(),
-			Field("store", false),
-			Field("book", false), ArrayRandomAccess(List(0)),
-			Field("title", false)))
+			RootNode,
+			Field("store"),
+			Field("book"), ArrayRandomAccess(List(0)),
+			Field("title")))
 		shouldParse("$['store']['book'][0]['title']", List(
-			Root(),
-			Field("store", false),
-			Field("book", false), ArrayRandomAccess(List(0)),
-			Field("title", false)))
+			RootNode,
+			Field("store"),
+			Field("book"), ArrayRandomAccess(List(0)),
+			Field("title")))
 		shouldParse("$.store.book[*].author", List(
-			Root(),
-			Field("store", false),
-			Field("book", false), ArraySlice(None, None),
-			Field("author", false)))
-		shouldParse("$..author", List(Root(), Field("author", true)))
-		shouldParse("$.store.*", List(Root(), Field("store", false), AnyField(false)))
-		shouldParse("$.store..price", List(Root(), Field("store", false), Field("price", true)))
-		shouldParse("$..*", List(Root(), AnyField(true)))
-		shouldParse("$.*", List(Root(), AnyField(false)))
-		shouldParse("$..book[2]", List(Root(), Field("book", true), ArrayRandomAccess(List(2))))
-		shouldParse("$.book[*]", List(Root(), Field("book", false), ArraySlice(None, None)))
-		shouldParse("$..book[*]", List(Root(), Field("book", true), ArraySlice(None, None)))
+			RootNode,
+			Field("store"),
+			Field("book"), ArraySlice(None, None),
+			Field("author")))
+		shouldParse("$..author", List(RootNode, RecursiveField("author")))
+		shouldParse("$.store.*", List(RootNode, Field("store"), AnyField))
+		shouldParse("$.store..price", List(RootNode, Field("store"), RecursiveField("price")))
+		shouldParse("$..*", List(RootNode, RecursiveAnyField))
+		shouldParse("$.*", List(RootNode, AnyField))
+		shouldParse("$..book[2]", List(RootNode, RecursiveField("book"), ArrayRandomAccess(List(2))))
+		shouldParse("$.book[*]", List(RootNode, Field("book"), ArraySlice(None, None)))
+		shouldParse("$..book[*]", List(RootNode, RecursiveField("book"), ArraySlice(None, None)))
 		shouldParse("$.store['store']..book['book'][0].title..title['title'].*..*.book[*]..book[*]", List(
-			Root(),
-			Field("store", false),
-			Field("store", false),
-			Field("book", true),
-			Field("book", false), ArrayRandomAccess(List(0)),
-			Field("title", false),
-			Field("title", true),
-			Field("title", false),
-			AnyField(false),
-			AnyField(true),
-			Field("book", false), ArraySlice(None, None),
-			Field("book", true), ArraySlice(None, None)))
+			RootNode,
+			Field("store"),
+			Field("store"),
+			RecursiveField("book"),
+			Field("book"), ArrayRandomAccess(List(0)),
+			Field("title"),
+			RecursiveField("title"),
+			Field("title"),
+			AnyField,
+			RecursiveAnyField,
+			Field("book"), ArraySlice(None, None),
+			RecursiveField("book"), ArraySlice(None, None)))
 	}
 
 	"Failures" should "be handled gracefully" in {
 		def gracefulFailure(query: String) =
-			compile(query) match {
+			new Parser().compile(query) match {
 				case Parser.Failure(msg, _) =>
 					info(s"""that's an expected failure for "$query": $msg""")
 				case other =>
@@ -146,15 +146,15 @@ class ParserSpec extends FlatSpec with ShouldMatchers with ParsingMatchers {
 
 	"Filters" should "work with subqueries" in {
 		parse(subscriptFilter, "[?(@..foo)]") should beParsedAs(
-			HasFilter(SubQuery(List(CurrentObject(), Field("foo", true)))))
+			HasFilter(SubQuery(List(CurrentNode, RecursiveField("foo")))))
 		parse(subscriptFilter, "[?(@.foo.baz)]") should beParsedAs(
-			HasFilter(SubQuery(List(CurrentObject(), Field("foo", false), Field("baz", false)))))
+			HasFilter(SubQuery(List(CurrentNode, Field("foo"), Field("baz")))))
 		parse(subscriptFilter, "[?(@['foo'])]") should beParsedAs(
-			HasFilter(SubQuery(List(CurrentObject(), Field("foo", false)))))
+			HasFilter(SubQuery(List(CurrentNode, Field("foo")))))
 
-		compile("$.things[?(@.foo.bar)]").get should be(Root()
+		new Parser().compile("$.things[?(@.foo.bar)]").get should be(RootNode
 			:: Field("things")
-			:: HasFilter(SubQuery(CurrentObject() :: Field("foo") :: Field("bar") :: Nil))
+			:: HasFilter(SubQuery(CurrentNode :: Field("foo") :: Field("bar") :: Nil))
 			:: Nil)
 
 	}
@@ -163,48 +163,52 @@ class ParserSpec extends FlatSpec with ShouldMatchers with ParsingMatchers {
 
 		// Check all supported ordering operators
 		parse(subscriptFilter, "[?(@ == 2)]") should beParsedAs(
-			ComparisonFilter(EqOperator, SubQuery(List(CurrentObject())), JPLong(2)))
+			ComparisonFilter(EqOperator, SubQuery(List(CurrentNode)), JPLong(2)))
 		parse(subscriptFilter, "[?(@ <= 2)]") should beParsedAs(
-			ComparisonFilter(LessOrEqOperator, SubQuery(List(CurrentObject())), JPLong(2)))
+			ComparisonFilter(LessOrEqOperator, SubQuery(List(CurrentNode)), JPLong(2)))
 		parse(subscriptFilter, "[?(@ >= 2)]") should beParsedAs(
-			ComparisonFilter(GreaterOrEqOperator, SubQuery(List(CurrentObject())), JPLong(2)))
+			ComparisonFilter(GreaterOrEqOperator, SubQuery(List(CurrentNode)), JPLong(2)))
 		parse(subscriptFilter, "[?(@ < 2)]") should beParsedAs(
-			ComparisonFilter(LessOperator, SubQuery(List(CurrentObject())), JPLong(2)))
+			ComparisonFilter(LessOperator, SubQuery(List(CurrentNode)), JPLong(2)))
 		parse(subscriptFilter, "[?(@ > 2)]") should beParsedAs(
-			ComparisonFilter(GreaterOperator, SubQuery(List(CurrentObject())), JPLong(2)))
+			ComparisonFilter(GreaterOperator, SubQuery(List(CurrentNode)), JPLong(2)))
 
 		// Trickier Json path expressions
 		parse(subscriptFilter, "[?(@.foo == 2)]") should beParsedAs(
-			ComparisonFilter(EqOperator, SubQuery(List(CurrentObject(), Field("foo", false))), JPLong(2)))
+			ComparisonFilter(EqOperator, SubQuery(List(CurrentNode, Field("foo"))), JPLong(2)))
 		parse(subscriptFilter, "[?(2 == @['foo'])]") should beParsedAs(
-			ComparisonFilter(EqOperator, JPLong(2), SubQuery(List(CurrentObject(), Field("foo", false)))))
+			ComparisonFilter(EqOperator, JPLong(2), SubQuery(List(CurrentNode, Field("foo")))))
 
-		compile("$['points'][?(@['y'] >= 3)].id").get should be(Root()
-			:: Field("points", false)
-			:: ComparisonFilter(GreaterOrEqOperator, SubQuery(List(CurrentObject(), Field("y", false))), JPLong(3))
-			:: Field("id", false) :: Nil)
+		// Allow reference to the root object
+		parse(subscriptFilter, "[?(@ == $['foo'])]") should beParsedAs(
+			ComparisonFilter(EqOperator, SubQuery(List(CurrentNode)), SubQuery(List(RootNode, Field("foo")))))
 
-		compile("$.points[?(@['id']=='i4')].x").get should be(Root()
-			:: Field("points", false)
-			:: ComparisonFilter(EqOperator, SubQuery(List(CurrentObject(), Field("id", false))), JPString("i4"))
-			:: Field("x", false) :: Nil)
+		new Parser().compile("$['points'][?(@['y'] >= 3)].id").get should be(RootNode
+			:: Field("points")
+			:: ComparisonFilter(GreaterOrEqOperator, SubQuery(List(CurrentNode, Field("y"))), JPLong(3))
+			:: Field("id") :: Nil)
+
+		new Parser().compile("$.points[?(@['id']=='i4')].x").get should be(RootNode
+			:: Field("points")
+			:: ComparisonFilter(EqOperator, SubQuery(List(CurrentNode, Field("id"))), JPString("i4"))
+			:: Field("x") :: Nil)
 	}
 
 	it should "work with some predefined boolean operators" in {
 		parse(subscriptFilter, "[?(@.foo && @.bar)]") should beParsedAs(
 			BooleanFilter(AndOperator,
-				HasFilter(SubQuery(List(CurrentObject(), Field("foo", false)))),
-				HasFilter(SubQuery(List(CurrentObject(), Field("bar", false))))))
-		
+				HasFilter(SubQuery(List(CurrentNode, Field("foo")))),
+				HasFilter(SubQuery(List(CurrentNode, Field("bar"))))))
+
 		parse(subscriptFilter, "[?(@.foo || @.bar)]") should beParsedAs(
 			BooleanFilter(OrOperator,
-				HasFilter(SubQuery(List(CurrentObject(), Field("foo", false)))),
-				HasFilter(SubQuery(List(CurrentObject(), Field("bar", false))))))
-		
-			parse(subscriptFilter, "[?(@.foo || @.bar <= 2)]") should beParsedAs(
+				HasFilter(SubQuery(List(CurrentNode, Field("foo")))),
+				HasFilter(SubQuery(List(CurrentNode, Field("bar"))))))
+
+		parse(subscriptFilter, "[?(@.foo || @.bar <= 2)]") should beParsedAs(
 			BooleanFilter(OrOperator,
-				HasFilter(SubQuery(List(CurrentObject(), Field("foo", false)))),
-				ComparisonFilter(LessOrEqOperator, SubQuery(List(CurrentObject(), Field("bar", false))), JPLong(2))))
+				HasFilter(SubQuery(List(CurrentNode, Field("foo")))),
+				ComparisonFilter(LessOrEqOperator, SubQuery(List(CurrentNode, Field("bar"))), JPLong(2))))
 	}
 
 }
