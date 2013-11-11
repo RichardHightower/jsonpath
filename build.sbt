@@ -2,7 +2,7 @@ name := "jsonpath"
 
 organization := "io.gatling"                                        
 
-version := "0.2.4"
+version := "0.2.5-SNAPSHOT"
 
 scalaVersion := "2.10.3"   
 
